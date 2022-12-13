@@ -1,7 +1,6 @@
 #pages spectral analysis
-#July 14, 2020
+#November 2022
 
-#put PAGES_crs_cleaned.rds into folder with script
 require(dplyr)
 require(tidyr)
 require(ggplot2)
@@ -14,28 +13,62 @@ library(scales)
 require(graphics)
 require(utils)
 require(dplR)
-
+require(lemon)
+require(ggforce)
+#install.packages("PaleoSpec")
+require(PaleoSpec)
+#require(devtools)
+#devtools::install_github("EarthSystemDiagnostics/paleospec")
+###########
+##this version uses the version of the PAGES database that I created which has had chronologies
+##truncated below an expressed population signal of 0.85.
+############
 trw<-readRDS(paste("PAGES_crns_cleaned.rds",sep=''))
+cru<-readRDS(paste("ExtractedMeanJJAtempsfromCRUData.rds", sep=''))
+hadcru_raw<-readRDS(paste("ExtractedMeanJJAtempsfromHADCRUData_NOT_INFILLED.rds", sep=''))
+hadcru<-readRDS(paste("ExtractedMeanJJAtempsfromHADCRUData_INFILLED.rds", sep=''))
+berear<-readRDS(paste("ExtractedMeanJJAtempsfromBerkeleyEarth 2.rds", sep=''))
 
-#get a list of unique site names
+
+####
+#get a list of unique site name and chronology metadatata
 sites<-lapply(trw, function(x) x$dataSetName)
-lengths<-lapply(trw, function(x) length(x$paleoData_values))
+#lengths<-lapply(trw, function(x) length(x$paleoData_values)) #mean of 577 unfiltered, 479 filtered
+#mean(unlist(lengths))
+lat<-lapply(trw, function(x) x$geo_latitude)
+lon<-lapply(trw, function(x) x$geo_longitude)
+meta<-data.frame(cbind(unlist(sites), unlist(lat), unlist(lon)))
+colnames(meta)<-c("sites","lat","lon")
+#remove duplicates
+meta<-distinct(meta)
+
 
 #remove versions with variance stabilization, as these are not useful
 trw<-trw[-which(sapply(trw, function(x) (x$paleoData_detrendingMethod == "AgeDependentStdCrnStb")))]
 trw<-trw[-which(sapply(trw, function(x) (x$paleoData_detrendingMethod == "SsfCrnStb")))]
 
-#AgeDep<-trw[sapply(trw, function(x) all(x$paleoData_detrendingMethod == "AgeDependentStdCrn"))]
-#Ssf<-trw[sapply(trw, function(x) all(x$paleoData_detrendingMethod == "SsfCrn"))]
-#Negex<-trw[sapply(trw, function(x) all(x$paleoData_detrendingMethod == "NegEx"))]
-#RCS<-trw[sapply(trw, function(x) all(x$paleoData_detrendingMethod == "RCS"))]
+#option to analyze just TRW, MXD or both
+#trw<-trw[-which(sapply(trw, function(x) (x$paleoData_proxy == "MXD")))]
+
+#create indivudal data objects for each type for addtional exploration if needed
+AgeDep<-trw[sapply(trw, function(x) all(x$paleoData_detrendingMethod == "AgeDependentStdCrn"))]
+Ssf<-trw[sapply(trw, function(x) all(x$paleoData_detrendingMethod == "SsfCrn"))]
+Negex<-trw[sapply(trw, function(x) all(x$paleoData_detrendingMethod == "NegEx"))]
+RCS<-trw[sapply(trw, function(x) all(x$paleoData_detrendingMethod == "RCS"))]
+
+#get the mean length of each type of proxy+detrending combiniation
+#lengths<-lapply(AgeDep, function(x) length(x$paleoData_values))#474(both), #523(mxd), #331
+#lengths<-lapply(Ssf, function(x) length(x$paleoData_values)) #486 (both), #536(mxd), #
+#lengths<-lapply(Negex, function(x) length(x$paleoData_values)) #494(both) #541(mxd), #
+#lengths<-lapply(RCS, function(x) length(x$paleoData_values)) #495 (both) #540(mxd), #
+
 
 #####tests on smoothing level using modified Daniell fitler (spans command)
 #test_ts<-AgeDep[1]
 #spectrum <- spectrum(test_ts[[1]]$paleoData_values, spans=c(2,2), log="yes", plot=T)
 ####
 
-#calculate spectra for all series represnted
+#calculate spectra for all series in database using a light smoothing kernel 
 all_spec_list<-list()
 
 for(i in 1:length(trw)) {
@@ -44,21 +77,23 @@ for(i in 1:length(trw)) {
   proxy <- trw[[i]]$paleoData_proxy
   detrend<-trw[[i]]$paleoData_detrendingMethod
   spectrum <- spectrum(rwi, spans=c(2,2), log="no", plot=F)
+  spectrum$freq<-spectrum$freq[-(1:2)]
+  spectrum$spec<-spectrum$spec[-(1:2)]
   all_spec_list[[paste0(name, "_" , proxy, "_", detrend)]] <- spectrum
   all_spec_list[[i]]$detrend<-detrend
   all_spec_list[[i]]$proxy<-proxy
   all_spec_list[[i]]$name<-name
 }
 
-#########use Raphael's code to smooth each spectrum using linear interpolation 
+#########use Raphael's code to interpolate each spectrum using linear interpolation 
 approx_specs<-list()
-test<-trw[[1]]
-
+#test<-trw[[1]]
 
 SpecApprox<-function(spec, xout=NULL,...){
   if(is.null(xout)){
-    frq.bnds<-log10(range(spec$freq))
-    xout<-10^seq(frq.bnds[1],frq.bnds[2],0.05)
+    #frq.bnds<-log10(range(spec$freq))
+    frq.bnds<-log10(c(1/1000,1/2)) #bin output by regular frequency bands
+    xout<-10^seq(frq.bnds[1],frq.bnds[2], 0.01)
   }
   int.spec<-approx(x = spec$freq,y = spec$spec,xout = xout,...)
   rtrn.spec<-list(freq=int.spec$x,
@@ -67,13 +102,21 @@ SpecApprox<-function(spec, xout=NULL,...){
   return(rtrn.spec)
 }
 
-test_spec<-spectrum(test$paleoData_values, spans = c(2,2), log = "no", plot = T)
-test_spec<-SpecApprox(test_spec)
+#test out different log smoothing options
+#test_spec<-spectrum(test$paleoData_values, spans = c(2,2), log = "no", plot = T)
+#test_smooth<-LogSmooth(test_spec, df.log = 0.05, removeFirst = 0, removeLast =  0)
+#plot(test_spec)
+#plot(test_smooth)
+#test3<-SpecApprox(test_smooth,xout = 10^seq(log10(1/5000),log10(1/2),0.001))
+#plot(test3)
 
-plot(test_spec)
 
+#apply smoothing and/or linear interpolation to each spectra using SpecApprox
+#option to smooth additionally using the LogSmooth command. I found this worked okay, but I still had a lot of 
+#noise in the mean curve due to averaging so many spectra together. 
 for(i in 1:length(all_spec_list)) {
   spc<-all_spec_list[[i]]
+  #smooth<-LogSmooth(spc, df.log = 0.05, removeFirst = 0, removeLast =  0)
   spc.apprx<-SpecApprox(spc)
   name <- all_spec_list[[i]]$name
   proxy <- all_spec_list[[i]]$proxy
@@ -84,9 +127,86 @@ for(i in 1:length(all_spec_list)) {
   approx_specs[[i]]$proxy<-proxy
 }
 
+##################process CRUTS and HADCRU/HADCRU raw data and BEST data
+cru_years<-cru$Year
+cru$Year<-NULL
+
+hadcru_years<-hadcru$Year
+hadcru$Year<-NULL
+
+hadcru_raw_years<-hadcru_raw$Year
+hadcru_raw$Year<-NULL
+
+berear_years<-berear$Year
+berear$Year<-NULL
+
+#filter raw values from hadcru raw data to remove the empty pixels
+#I've already interpolated across NA values up to 4 years in length when curating the data from HadCRU, so this is now removing all series prior to 
+#that point, which are currently contained as series with NA values. 
+#this is important because the spectra command will not operate if there are NA values present
+hadcru_raw_filter<-list()
+
+for(i in hadcru_raw) {
+  filt<-if(all(is.na(i))) NA else((na.contiguous(i)))
+  hadcru_raw_filter[[length(hadcru_raw_filter)+1]]<-unlist(filt)
+}
+
+#how many years are on average included in the analysis after filtering?
+n<-lapply(hadcru_raw_filter, function(x) length(x))
+n<-unlist(n)
+mean(n)
+#131 years on average
+
+hadcru_filter<-list()
+
+for(i in hadcru) {
+  filt<-if(all(is.na(i))) NA else((na.contiguous(i)))
+  hadcru_filter[[length(hadcru_filter)+1]]<-unlist(filt)
+}
+
+n<-lapply(hadcru_filter, function(x) length(x))
+n<-unlist(n)
+mean(n)
+#172 years on average (good)          
+
+
+#add names and combine climate datasets for efficiency
+names<-names(cru)
+
+cru_names<-paste0(names, "_cru")
+hadcru_names<-paste0(names, "_hadcru")
+hadcru_raw_names<-paste0(names, "_hadcru.raw")
+bear_names<-paste0(names, "_bear")
+
+names(cru)<-cru_names
+names(hadcru_filter)<-hadcru_names
+names(hadcru_raw_filter)<-hadcru_raw_names
+names(berear)<-bear_names
+ 
+#bidn all dataframes together
+clim<-c(cru, hadcru_filter, hadcru_raw_filter, berear)
+
+
+#perform the spectral analysis of CRU database of extracted grid cells,
+#apply spec approx function to interpolate. 
+
+#NOTE I'm clipping the lowest two frequency bands to where the spectra is unreliable due to series length
+clim_specs<-list()
+
+for(i in 1:length(clim)) {
+  tmp<-clim[[i]]
+  spectrum <- spectrum(tmp, spans=c(2,2), log="no", plot=F)
+  spectrum$freq<-spectrum$freq[-(1:2)]
+  spectrum$spec<-spectrum$spec[-(1:2)]
+  #smooth<-LogSmooth(spectrum, df.log = 0.05, removeFirst = 0, removeLast =  0)
+  spc.apprx<-SpecApprox(spectrum)
+  name <- names(clim[i])
+  clim_specs[[paste0(name)]] <- spc.apprx
+}
+
+
 #take series out of list and transform into one long dataframe for plotting and stats. 
 #Takes a minute
-
 spec_df<-setNames(data.frame(matrix(ncol = 5, nrow = 0)), c("freq","spec","detrending_type","proxy","name"))
 
 for(i in 1:length(all_spec_list)) {
@@ -100,49 +220,85 @@ for(i in 1:length(all_spec_list)) {
   spec_df<-rbind(spec_df, spec_bind)
 }
 
+###make data frame of CRU data
+clim_df<-setNames(data.frame(matrix(ncol = 5, nrow = 0)), c("freq","spec","data_type","proxy", "name"))
 
-#preserve original 
-spec_df_original<-spec_df
-spec_df<-spec_df_original
+for(i in 1:length(clim_specs)) {
+  freq <- clim_specs[[i]]$freq
+  spec <- clim_specs[[i]]$spec
+  name <- replicate(length(freq), names(clim_specs[i]))
+  data_type<-replicate(length(freq), strsplit(name, '_')[[1]][2])
+  proxy<-replicate(length(freq), "instrumental")
+  spec_bind<-cbind(freq, spec, data_type,proxy, name)
+  spec_bind<-as.data.frame(spec_bind)
+  clim_df<-rbind(clim_df, spec_bind)
+}
 
-#######option to bin by frequency####
-#spec_df$freq[spec_df$freq <= 0.000] <- 0.0005
-#spec_df$freq[spec_df$freq <= 0.002 & spec_df$freq > 0.001]<-"0.002" #500-1000
-#spec_df$freq[spec_df$freq <= 0.004 & spec_df$freq > 0.002]<-"0.004" #250-500
-#spec_df$freq[spec_df$freq <= 0.01 & spec_df$freq > 0.004]<-"0.01" #100-250
-#spec_df$freq[spec_df$freq <= 0.02 & spec_df$freq > 0.01]<-"0.02" #50-100
-#spec_df$freq[spec_df$freq <= 0.05 & spec_df$freq > 0.02]<-"0.05" #20-50
-#spec_df$freq[spec_df$freq <= 0.1 & spec_df$freq > 0.05]<-"0.1" #10-20
-#spec_df$freq[spec_df$freq > 0.1 ]<-"0.1" #0-10
-#unique(spec_df$freq)
-#######
-#########
+
 
 #for some reason the values output from the previous functions as character vectors. 
 spec_df$freq<-as.numeric(spec_df$freq)
 spec_df$spec<-as.numeric(spec_df$spec)
 
+clim_df$freq<-as.numeric(clim_df$freq)
+clim_df$spec<-as.numeric(clim_df$spec)
+
+
+#do some filtering of the lower frequencies where the spectra become clearly dominated by a few long records
+spec_df <- spec_df %>%
+  filter(freq > 0.00666)
+
+#clim_bear<-clim_df %>%
+#  group_by(data_type)%>%
+#  filter(data_type == "bear" & freq > 0.03)
+
+# do some filtering of the hadcru raw (noisy at low frequencies) and cru (short series)
+# this is a roundabout way, again there should be a dplyr filter option for this but i couldn't figure it out quickly
+clim_hadcru_raw<-clim_df %>%
+  group_by(data_type)%>%
+  filter(data_type == "hadcru.raw")%>%
+  filter(freq > 0.03)
+
+clim_hadcru_raw<-as.data.frame(clim_hadcru_raw)
+clim_hadcru_raw$freq<-as.numeric(clim_hadcru_raw$freq)
+clim_hadcru_raw$spec<-as.numeric(clim_hadcru_raw$spec)
+
+clim_cru<-clim_df %>%
+  group_by(data_type)%>%
+  filter(data_type == "cru")%>%
+  filter(freq > 0.016)
+
+clim_cru<-as.data.frame(clim_cru)
+clim_crufreq<-as.numeric(clim_cru$freq)
+clim_cru$spec<-as.numeric(clim_cru$spec)
+
+
+clim_df <- clim_df%>%
+  filter( data_type !="hadcru.raw" & data_type != "cru")
+
+#add everything back together
+clim_df<-rbind(clim_df, clim_hadcru_raw, clim_cru)
+
+
+colnames(spec_df)[3]<-"data_type"
+#make into one dataset for plotting
+all_specs<-rbind(clim_df, spec_df)
+
+all_specs <- all_specs%>%
+  filter(!is.na(spec))
+
 #calculate beta values on full dataframe by detrending type
-spec_betas <- spec_df %>%
-  group_by(detrending_type) %>%
+betas <- all_specs %>% 
+  group_by(data_type) %>%
   do(mod = lm(log(spec)~log(freq), data = .))%>%
   mutate(Slope = summary(mod)$coefficients[2]) %>%
   dplyr::select(-mod)              
 
 
-#do a bit of rounding, but be careful because the lowest frequencies can get rounded to zero. 
-spec_df$freq<-round(spec_df$freq, 3)
-spec_df$spec<-round(spec_df$spec, 4)
-
-#if needed you can make everything less than 0.001 equal to 0.001, there arent' that many series that go so low. 
-spec_df$freq[spec_df$freq <= 0.001] <- 0.001
-spec_df$freq<-format(spec_df$freq, scientific=F)
-
-#make frequency into a factor to calculate confidence intervals. 
-spec_df$freq<-as.factor(spec_df$freq)
-
-spec_sums <- spec_df %>%
-  group_by(detrending_type, freq) %>%
+#calculate a mean and variance for ribbon plot, with 95% confidence intervals
+#note that this is NOT a good method of calculating CI intervals for these curves. 
+spec_sums <- all_specs %>%
+  group_by(data_type, freq) %>%
   summarise(mean.spec = mean(spec, na.rm = T),
             sd.spec = sd(spec, na.rm = T),
             var.spec = var(spec, na.rm = T),
@@ -154,30 +310,6 @@ spec_sums <- spec_df %>%
          upper.ci.spec = mean.spec + qt(1 - (0.01 / 2), n.spec - 1) * se.spec)
 
 
-spec_sums$freq<-as.numeric(as.character(spec_sums$freq))
-
-spec_betas <- spec_sums %>%
-  group_by(detrending_type) %>%
-  do(mod = lm(log(mean.spec)~log(freq), data = .))%>%
-  mutate(Slope = summary(mod)$coefficients[2]) %>%
-  dplyr::select(-mod)  
-
-
-spec_sums<-spec_sums %>%
-  filter(freq > 0.0001)
-
-#d a little smoothing on the mean and confidence bands to reduce noise at high frequencies
-spec_smooths <- spec_sums %>%
-  group_by(detrending_type) %>%
-  summarise(smoothed.mean = ffcsaps(mean.spec, nyrs = 10, f=0.5),
-            smoothed.upper.ci = ffcsaps(upper.ci.spec, nyrs = 10, f=0.5),
-            smoothed.lower.ci = ffcsaps(lower.ci.spec, nyrs = 10, f=0.5))
-
-spec_smooths$freq<-spec_sums$freq
-spec_smooths$smoothed.upper.ci<-round(spec_smooths$smoothed.upper.ci, 5)
-spec_smooths$smoothed.lower.ci<-round(spec_smooths$smoothed.lower.ci, 5)
-
-spec_smooths$smoothed.lower.ci[spec_smooths$smoothed.lower.ci < 0] <-0.00001
 
 theme1<-theme(legend.key = element_blank(),
                 text = element_text(size = 12),
@@ -190,38 +322,60 @@ theme1<-theme(legend.key = element_blank(),
                 #axis.line = element_blank(),
                 legend.position=c(.3,.75))
 
-require(lemon)
+#####normalize to a consistent starting value using the highest frequency bands of 2-8 years
+#mean at high frequencies = 0.26
+spec_high<-spec_sums %>%
+  group_by(data_type)%>%
+  filter(freq > 0.125)%>%
+  summarise(mean_high = mean(mean.spec),
+            ratio = mean_high/0.26,
+            scaled = 1/ratio) 
+  
+  
+#normalize each mean curve by it's respective scaling value
+#there should be a better way to do this using a mutate function, but I couldn't figure it out quickly. 
+#Also, this might allow you to modify the individual scaling values if you wanted to avoid overplotting, for example,
+#dropping the tree-ring slightly to show difference in variability at high frequencies
+spec_sums$mean.spec[spec_sums$data_type == "RCS"]<-spec_sums$mean.spec[spec_sums$data_type == "RCS"]*spec_high$scaled[spec_high$data_type=="RCS"]
+spec_sums$mean.spec[spec_sums$data_type == "AgeDependentStdCrn"]<-spec_sums$mean.spec[spec_sums$data_type == "AgeDependentStdCrn"]*spec_high$scaled[spec_high$data_type=="AgeDependentStdCrn"]
+spec_sums$mean.spec[spec_sums$data_type == "SsfCrn"]<-spec_sums$mean.spec[spec_sums$data_type == "SsfCrn"]*spec_high$scaled[spec_high$data_type=="SsfCrn"]
+spec_sums$mean.spec[spec_sums$data_type == "NegEx"]<-spec_sums$mean.spec[spec_sums$data_type == "NegEx"]*spec_high$scaled[spec_high$data_type=="NegEx"]
+spec_sums$mean.spec[spec_sums$data_type == "cru"]<-spec_sums$mean.spec[spec_sums$data_type == "cru"]*spec_high$scaled[spec_high$data_type=="cru"]
+spec_sums$mean.spec[spec_sums$data_type == "hadcru"]<-spec_sums$mean.spec[spec_sums$data_type == "hadcru"]*spec_high$scaled[spec_high$data_type=="hadcru"]
+spec_sums$mean.spec[spec_sums$data_type == "hadcru.raw"]<-spec_sums$mean.spec[spec_sums$data_type == "hadcru.raw"]*spec_high$scaled[spec_high$data_type=="hadcru.raw"]
+spec_sums$mean.spec[spec_sums$data_type == "bear"]<-spec_sums$mean.spec[spec_sums$data_type == "bear"]*spec_high$scaled[spec_high$data_type=="bear"]
 
-spec_smooths<-as.data.frame(spec_smooths)
-
-spec_sums<-spec_sums%>%
-  filter(lower.ci.spec != "NaN")
-
+#I'm plotting using a loess smoothing function instead of the original line. This could also be done higher up in the workflow, but I was having trouble using specApprox and LogSmooth together
 p1<-ggplot()+
-  #geom_line()+ 
-  geom_ribbon(data = spec_sums, aes(x = freq, ymin = lower.ci.spec, ymax = upper.ci.spec, fill = detrending_type), 
-              colour = NA, alpha = 0.4)+
-  geom_line(aes(x = freq, y = mean.spec, color=detrending_type), data = spec_sums)+
+  #geom_line(aes(x = freq, y = mean.spec, color = data_type), data = spec_sums)+
   theme_bw()+
+  geom_smooth(data = spec_sums, aes(x=freq, y=mean.spec, color = data_type),span=0.1, method = "loess", se=FALSE)+
+  #geom_ribbon(data = spec_sums, aes(x = freq, ymin = lower.ci.spec, ymax = upper.ci.spec, fill = data_type), alpha = 0.5)+
   theme(panel.border=element_blank(), axis.line=element_line())+
-  ylab(expression(PSD~(K^2~yr^-1)))+
+  #annotation_custom(tableGrob(betas), xmin=0.001, ymin=0.2)+
+  #ylab(expression(PSD~(TRW^2~yr^-1)))+
+  ylab(expression(PSD ^2~yr^-1))+
   xlab(expression(Delta~"t"~"(year)"))+
-  scale_fill_manual(name = "Method", breaks = c("AgeDependentStdCrn", "NegEx", "RCS","SsfCrn"), 
-                    labels = c("Age-dependent spline","Negative exponential curve","Regional curve standardization", "Signal-free detrending"), 
-                    values = c("#66c2a5", "#fc8d62", "#8da0cb", "#e78ac3"))+
-  scale_color_manual(name = "Method", breaks = c("AgeDependentStdCrn", "NegEx", "RCS","SsfCrn"), 
-                    labels = c("Age-dependent spline","Negative exponential curve","Regional curve standardization", "Signal-free detrending"), 
-                    values = c("#66c2a5", "#fc8d62", "#8da0cb", "#e78ac3"))+
-  scale_y_continuous(trans=c('log10'), limits = c(0.005, 10)) +
-  scale_x_continuous(trans=c("log10" , "reverse"), limits = c(0.47,0.001), breaks = c(0.33, 0.1, 0.033, 0.01, 0.0033,0.001), 
-                     labels = c("3", "10","30","100","300","1000"))+
-  theme1+
+  scale_fill_manual(name = "Method", breaks = c("AgeDependentStdCrn", "NegEx", "RCS","SsfCrn","cru","hadcru", "hadcru.raw","bear"), 
+                    labels = c("Age-dependent spline (n=523","Negative exponential curve (n=541)","Regional curve standardization (n=540)", "Signal-free detrending (n=536)", "CRU Summer Temp (C) (1901-2020)", "HadCRU Summer Temp Anomalies (C) (1850-2021)","HadCRU Summer Temp Anomalies (raw data) (C) (131 year average)", "Berkeley Earth Summer Temp Anomalies (1850-2021) (C)"), 
+                    values = c("#66c2a5", "#fc8d62", "#8da0cb", "#e78ac3", "#a6d854", "#e6ab02", "#a6761d", "#666666"))+
+  scale_color_manual(name = "Method", breaks = c("AgeDependentStdCrn", "NegEx", "RCS","SsfCrn","cru","hadcru", "hadcru.raw","bear"), 
+                    labels = c("Age-dependent spline (n=523)","Negative exponential curve (n=541)","Regional curve standardization (n=540)", "Signal-free detrending (n=536)", "CRU Summer Temp (C) (1901-2020)", "HadCRU Summer Temp Anomalies (C) (1850-2021)","HadCRU Summer Temp Anomalies (raw data) (C) (131 year average)", "Berkeley Earth Summer Temp Anomalies (1850-2021) (C)"), 
+                    values = c("#66c2a5", "#fc8d62", "#8da0cb", "#e78ac3", "#a6d854", "#e6ab02", "#a6761d", "#666666"))+
+  scale_x_continuous(trans = trans_reverser('log10'), limits = c(0.5,0.003), 
+                    breaks = c(0.3, 0.1, 0.033, 0.01, 0.0033,0.001), 
+                    labels = c("3", "10","30","100","300","1000"))+
+  #scale_x_continuous(trans=trans_reverser('log10'))+
+  #scale_y_continuous(trans=c('log10'))+
+  scale_y_continuous(trans=c('log10'), limits = c(0.1, 15)) +
+  #scale_x_continuous(trans = trans_reverser('log10'), limits = c(0.5,0.001))+
+  #theme1+
   coord_capped_cart(bottom="both", left="both")+
   theme(panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),
         axis.text = element_text(color = "black"),
         plot.title = element_text(hjust = 0.5))+
-  ggtitle("PAGES spectra")
+  ggtitle("PAGES MXD and Climate temperture spectra")
 p1
 
-ggsave(p1, file = "PAGES.png", width = 5.1, height = 5, dpi = 300, units = "in")
+#ggsave(p1, file = "PAGES_MXD_and_clim_spectra_allcurves.png", width =12, height = 6, dpi = 300, units = "in")
